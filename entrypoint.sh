@@ -1,47 +1,49 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
 : "${TS_AUTHKEY:?Set TS_AUTHKEY}"
 : "${WG_CONF:?Set WG_CONF (e.g. /config/wg0.conf)}"
 
+PROTON_DNS="${PROTON_DNS:-10.2.0.1}"
+
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
-sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null || true
 
 # Bring up WireGuard (Proton)
 mkdir -p /etc/wireguard
 cp "$WG_CONF" /etc/wireguard/wg0.conf
 wg-quick up wg0
 
-# Basic "killswitch": if wg0 drops, don't leak via eth0
-# Only allow forwarding from tailscale0 -> wg0, and established back.
+# Start tailscaled
+mkdir -p /var/lib/tailscale
+tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+sleep 1
+
+# Tailscale exit node
+tailscale up \
+    --authkey="${TS_AUTHKEY}" \
+    --hostname="${TS_HOSTNAME:-unraid-proton-exit}" \
+    --advertise-exit-node \
+    --accept-dns=false
+
+# --- Firewall/NAT ---
+# Default drop forwarding to avoid leaks
 iptables -P FORWARD DROP
+
+# Allow TS clients to go out via wg0 only; allow replies back
 iptables -A FORWARD -i tailscale0 -o wg0 -j ACCEPT
 iptables -A FORWARD -i wg0 -o tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 # NAT out through VPN
 iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
 
-# Start tailscaled
-mkdir -p /var/lib/tailscale
-tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
-sleep 1
+# --- Force DNS through Proton (NetShield) ---
+# Redirect any DNS from tailscale clients to Proton's in-tunnel DNS
+iptables -t nat -A PREROUTING -i tailscale0 -p udp --dport 53 -j DNAT --to-destination "${PROTON_DNS}:53"
+iptables -t nat -A PREROUTING -i tailscale0 -p tcp --dport 53 -j DNAT --to-destination "${PROTON_DNS}:53"
 
-# Bring up Tailscale as an exit node
-TS_ARGS=(
-    --authkey="${TS_AUTHKEY}"
-    --hostname="${TS_HOSTNAME:-unraid-proton-exit}"
-    --advertise-exit-node
-    --accept-dns=false
-)
+# Allow the redirected DNS traffic out wg0
+iptables -A FORWARD -i tailscale0 -o wg0 -p udp -d "${PROTON_DNS}" --dport 53 -j ACCEPT
+iptables -A FORWARD -i tailscale0 -o wg0 -p tcp -d "${PROTON_DNS}" --dport 53 -j ACCEPT
 
-# Optional: force exit-node clients to use specific DNS
-# e.g. your own resolver over VPN, or Proton-provided DNS if you know it.
-if [[ -n "${TS_DNS:-}" ]]; then
-    TS_ARGS+=( --dns="${TS_DNS}" )
-fi
-
-tailscale up "${TS_ARGS[@]}"
-
-echo "Ready: Tailscale exit node via Proton WireGuard is up."
+echo "Ready: exit node via Proton WireGuard. DNS forced to ${PROTON_DNS} (NetShield)."
 exec tail -f /dev/null
