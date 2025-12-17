@@ -6,7 +6,7 @@ set -euo pipefail
 
 PROTON_DNS="${PROTON_DNS:-10.2.0.1}"
 
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
 # Bring up WireGuard (Proton)
 mkdir -p /etc/wireguard
