@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     wireguard-tools \
     dumb-init \
+    openresolv \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
